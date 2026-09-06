@@ -216,6 +216,10 @@ def ingest_prova(
             carregadas += 1
             if carregadas % 10 == 0:
                 typer.echo(f"  {carregadas}/{len(segmentos)} questões extraídas...")
+        from provas.validation.regras import validar_prova
+
+        e, a = validar_prova(session, prova)
+        typer.echo(f"Validação automática: {e} erros, {a} avisos.")
         session.commit()
         typer.echo(
             f"Prova id={prova.id} carregada: {carregadas} questões, "
@@ -266,6 +270,10 @@ def ingest_gabarito(
         gab, prompt = extrair_gabarito(cliente, art, caderno=caderno)
         prov = RegistradorProveniencia(session, arq, modelo_configurado(), prompt)
         res = reconciliar_gabarito(session, prova=prova, gabarito=gab, tipo=tipo, prov=prov)
+        from provas.validation.regras import validar_prova
+
+        e, a = validar_prova(session, prova)
+        typer.echo(f"Validação automática: {e} erros, {a} avisos.")
         session.commit()
         typer.echo(
             f"Gabarito {tipo} aplicado: {res.aplicados} questões, "
@@ -334,6 +342,10 @@ def classificar_temas(
                 typer.echo(f"  {i}/{len(questoes)} classificadas...")
         if prova.status == "gabarito_carregado":
             prova.status = "classificada"
+        from provas.validation.regras import validar_prova
+
+        e, a = validar_prova(session, prova)
+        typer.echo(f"Validação automática: {e} erros, {a} avisos.")
         session.commit()
         typer.echo(
             f"{len(questoes)} questões classificadas: {nao_mapeadas} tema_nao_mapeado, "
@@ -369,6 +381,93 @@ def aprovar_temas(
         criados = aprovar_propostas(session, pendentes)
         session.commit()
         typer.echo(f"{len(criados)} temas canônicos criados; propostas resolvidas.")
+
+
+@app.command("validate")
+def validate(
+    prova_id: int | None = typer.Option(None, "--prova-id", help="Omitir = todas as provas."),
+) -> None:
+    """Roda a camada de validação e grava os achados em validacao."""
+    from sqlalchemy import select
+
+    from provas.db.engine import get_engine, get_session_factory
+    from provas.db.tables import Prova
+    from provas.validation.regras import validar_prova
+
+    engine = get_engine()
+    factory = get_session_factory(engine)
+    with factory() as session:
+        if prova_id is not None:
+            alvo = session.get(Prova, prova_id)
+            if alvo is None:
+                raise typer.BadParameter(f"prova id={prova_id} não existe")
+            provas_alvo = [alvo]
+        else:
+            provas_alvo = list(session.scalars(select(Prova)))
+        if not provas_alvo:
+            typer.echo("Nenhuma prova no banco.")
+            raise typer.Exit(0)
+        total_e = total_a = 0
+        for p in provas_alvo:
+            e, a = validar_prova(session, p)
+            total_e += e
+            total_a += a
+            typer.echo(f"prova id={p.id} ({p.ano}): {e} erros, {a} avisos → status={p.status}")
+        session.commit()
+        typer.echo(f"Total: {total_e} erros, {total_a} avisos.")
+        if total_e:
+            raise typer.Exit(1)
+
+
+@app.command("revisar")
+def revisar(
+    regra: str | None = typer.Option(None, "--regra", help="Filtra por nome de regra."),
+    resolver: int | None = typer.Option(
+        None, "--resolver", help="ID da linha de validacao a fechar (marca revisada_por_humano)."
+    ),
+    resolvido_por: str = typer.Option("humano", "--por"),
+) -> None:
+    """Fila de pendências agrupada por regra; --resolver fecha uma pendência."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from provas.db.engine import get_engine, get_session_factory
+    from provas.db.tables import Questao, Validacao
+
+    engine = get_engine()
+    factory = get_session_factory(engine)
+    with factory() as session:
+        if resolver is not None:
+            v = session.get(Validacao, resolver)
+            if v is None:
+                raise typer.BadParameter(f"validacao id={resolver} não existe")
+            v.resolvido = True
+            v.resolvido_por = resolvido_por
+            v.resolvido_em = datetime.now(UTC).replace(tzinfo=None)
+            if v.tabela == "questao" and v.registro_id is not None:
+                q = session.get(Questao, v.registro_id)
+                if q is not None:
+                    q.revisada_por_humano = True
+            session.commit()
+            typer.echo(f"validacao id={resolver} ({v.regra}) resolvida por {resolvido_por}.")
+            return
+
+        stmt = select(Validacao).where(Validacao.resolvido.is_(False))
+        if regra:
+            stmt = stmt.where(Validacao.regra == regra)
+        pendentes = list(session.scalars(stmt.order_by(Validacao.regra, Validacao.id)))
+        if not pendentes:
+            typer.echo("Fila vazia.")
+            return
+        atual = None
+        for v in pendentes:
+            if v.regra != atual:
+                atual = v.regra
+                n = sum(1 for x in pendentes if x.regra == atual)
+                typer.echo(f"\n== {atual} ({n}) ==")
+            typer.echo(f"  [{v.id}] ({v.severidade}) {v.mensagem}")
+        typer.echo(f"\n{len(pendentes)} pendências. Fechar: provas revisar --resolver <ID>")
 
 
 if __name__ == "__main__":
