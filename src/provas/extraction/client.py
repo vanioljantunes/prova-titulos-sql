@@ -37,11 +37,29 @@ def modelo_configurado() -> str:
     return os.environ.get("PROVAS_MODEL", DEFAULT_MODEL)
 
 
+def _carregar_dotenv() -> None:
+    """Carrega ANTHROPIC_API_KEY de um .env na raiz do projeto, se existir."""
+    env = Path(".env")
+    if not env.exists():
+        return
+    for linha in env.read_text(encoding="utf-8").splitlines():
+        linha = linha.strip()
+        if linha and not linha.startswith("#") and "=" in linha:
+            chave, _, valor = linha.partition("=")
+            os.environ.setdefault(chave.strip(), valor.strip().strip('"').strip("'"))
+
+
 def criar_cliente() -> Any:
-    """Instructor sobre Anthropic. Exige ANTHROPIC_API_KEY no ambiente."""
+    """Instructor sobre Anthropic. Exige ANTHROPIC_API_KEY (ambiente ou .env)."""
     import anthropic
     import instructor
 
+    _carregar_dotenv()
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY ausente. Defina no ambiente ou crie um arquivo .env "
+            "na raiz do projeto com: ANTHROPIC_API_KEY=sk-ant-..."
+        )
     return instructor.from_anthropic(anthropic.Anthropic())
 
 
