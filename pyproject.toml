@@ -10,6 +10,7 @@ dependencies = [
     "alembic>=1.14",
     "pydantic>=2.9",
     "typer>=0.15",
+    "docling>=2.126.0",
 ]
 
 [project.scripts]
@@ -42,7 +43,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
 "migrations/versions/*" = ["E501", "W291"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 mypy_path = "src"
 packages = ["provas"]

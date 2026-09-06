@@ -27,5 +27,22 @@ def init_db() -> None:
     typer.echo(f"Schema em {url} atualizado para a head do Alembic.")
 
 
+@app.command("parse")
+def parse(
+    caminho: str,
+    force: bool = typer.Option(False, "--force", help="Reparseia mesmo se o interim já existir."),
+) -> None:
+    """(Utilitário) Parseia um PDF com Docling e grava os artefatos em data/interim/."""
+    from pathlib import Path
+
+    from provas.parsing.docling_parser import parse_pdf
+
+    art = parse_pdf(Path(caminho), force=force)
+    typer.echo(
+        f"hash={art.hash_sha256[:16]} paginas={art.num_paginas} "
+        f"markdown={art.markdown_path} pages={art.pages_dir}"
+    )
+
+
 if __name__ == "__main__":
     app()
