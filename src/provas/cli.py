@@ -154,6 +154,77 @@ def ingest_edital(
                 typer.echo(f"  - [{p.extraido.codigo or '-'}] {p.extraido.texto_original}")
 
 
+@app.command("ingest-prova")
+def ingest_prova(
+    caminho: str,
+    sociedade: str = typer.Option(..., "--sociedade"),
+    ano: int = typer.Option(..., "--ano"),
+    edicao: int = typer.Option(1, "--edicao"),
+    caderno: str | None = typer.Option(None, "--caderno", help='ex.: "Tipo 1"'),
+    num_questoes: int | None = typer.Option(
+        None, "--num-questoes", help="num_questoes_declarado (do caderno/edital)."
+    ),
+    edital_id: int | None = typer.Option(None, "--edital-id"),
+    especialidade: str | None = typer.Option(None, "--especialidade"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Ingere uma prova: parse → segmentação → extração multimodal por questão → carga."""
+    from pathlib import Path
+
+    from provas.db.engine import get_engine, get_session_factory
+    from provas.db.fontes import registrar_arquivo_fonte
+    from provas.db.loaders_edital import RegistradorProveniencia
+    from provas.db.loaders_prova import carregar_figuras, carregar_questao, criar_prova
+    from provas.extraction.client import criar_cliente, modelo_configurado
+    from provas.extraction.prova import extrair_questao, persistir_segmentacao
+    from provas.parsing.artifacts import interim_dir
+    from provas.parsing.docling_parser import parse_pdf
+    from provas.parsing.segmenter import carregar_page_texts, segmentar
+
+    engine = get_engine()
+    factory = get_session_factory(engine)
+    with factory() as session:
+        soc = _obter_sociedade(session, sociedade, especialidade)
+        art = parse_pdf(Path(caminho), force=force)
+        arq = registrar_arquivo_fonte(
+            session, Path(caminho), "prova", num_paginas=art.num_paginas, force=force
+        )
+
+        page_texts = carregar_page_texts(interim_dir(art.hash_sha256))
+        segmentos = segmentar(page_texts)
+        persistir_segmentacao(art, segmentos)
+        if not segmentos:
+            typer.echo("ERRO: segmentação não encontrou nenhuma questão. Abortando.", err=True)
+            raise typer.Exit(2)
+        typer.echo(f"Segmentação: {len(segmentos)} questões (1..{segmentos[-1].numero}).")
+
+        prova = criar_prova(
+            session, sociedade=soc, arquivo_fonte=arq, ano=ano, edicao=edicao,
+            edital_id=edital_id, tipo_caderno=caderno, num_questoes_declarado=num_questoes,
+        )
+        figuras = carregar_figuras(interim_dir(art.hash_sha256))
+        cliente = criar_cliente()
+        contextos_cache: dict[str, int] = {}
+        carregadas = 0
+        for seg in segmentos:
+            extraida, prompt = extrair_questao(cliente, art, seg, force=force)
+            prov = RegistradorProveniencia(session, arq, modelo_configurado(), prompt)
+            carregar_questao(
+                session, prova=prova, sigla=soc.sigla, extraida=extraida,
+                segmento=seg, figuras=figuras, prov=prov, contextos_cache=contextos_cache,
+            )
+            carregadas += 1
+            if carregadas % 10 == 0:
+                typer.echo(f"  {carregadas}/{len(segmentos)} questões extraídas...")
+        session.commit()
+        typer.echo(
+            f"Prova id={prova.id} carregada: {carregadas} questões, "
+            f"{len(contextos_cache)} contextos, "
+            f"{sum(1 for f in figuras if f.usada)}/{len(figuras)} figuras associadas. "
+            f"Gabaritos permanecem nulos (use ingest-gabarito)."
+        )
+
+
 @app.command("aprovar-temas")
 def aprovar_temas(
     edital_id: int | None = typer.Option(None, "--edital-id"),
