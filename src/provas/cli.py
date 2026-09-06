@@ -277,6 +277,70 @@ def ingest_gabarito(
             typer.echo(f"AVISO: questões sem item no gabarito: {res.sem_item_no_gabarito}")
 
 
+@app.command("classificar-temas")
+def classificar_temas(
+    prova_id: int = typer.Option(..., "--prova-id"),
+    force: bool = typer.Option(False, "--force", help="Reclassifica ignorando o cache."),
+) -> None:
+    """Classifica as questões da prova contra o vocabulário do edital vigente."""
+    from sqlalchemy import select
+
+    from provas.db.engine import get_engine, get_session_factory
+    from provas.db.loaders_classificacao import aplicar_classificacao
+    from provas.db.tables import Prova, Questao
+    from provas.extraction.classificar import (
+        classificar_questao,
+        persistir_vocabulario_usado,
+        vocabulario_do_edital_vigente,
+    )
+    from provas.extraction.client import criar_cliente, modelo_configurado
+
+    engine = get_engine()
+    factory = get_session_factory(engine)
+    with factory() as session:
+        prova = session.get(Prova, prova_id)
+        if prova is None:
+            raise typer.BadParameter(f"prova id={prova_id} não existe")
+        vigente, vocabulario = vocabulario_do_edital_vigente(session, prova.sociedade_id)
+        if vigente is None or not vocabulario:
+            typer.echo(
+                "ERRO: não há edital vigente com conteúdo programático para esta "
+                "sociedade. Ingira um edital (e aprove os temas) antes de classificar.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        persistir_vocabulario_usado(prova_id, vocabulario)
+        typer.echo(
+            f"Vocabulário: {len(vocabulario)} temas do edital id={vigente.id} "
+            f"({vigente.ano}). Modelo: {modelo_configurado()}."
+        )
+
+        questoes = session.scalars(
+            select(Questao).where(Questao.prova_id == prova_id).order_by(Questao.numero)
+        ).all()
+        cliente = criar_cliente()
+        nao_mapeadas = 0
+        baixa_conf = 0
+        for i, q in enumerate(questoes, start=1):
+            resultado, _prompt = classificar_questao(
+                cliente, session, q, vocabulario, force=force
+            )
+            aplicar_classificacao(session, q, resultado, modelo=modelo_configurado())
+            if resultado.tema_principal_id is None:
+                nao_mapeadas += 1
+            elif resultado.confianca < 0.7:
+                baixa_conf += 1
+            if i % 10 == 0:
+                typer.echo(f"  {i}/{len(questoes)} classificadas...")
+        if prova.status == "gabarito_carregado":
+            prova.status = "classificada"
+        session.commit()
+        typer.echo(
+            f"{len(questoes)} questões classificadas: {nao_mapeadas} tema_nao_mapeado, "
+            f"{baixa_conf} com confiança < 0.7 (ambas na fila de revisão)."
+        )
+
+
 @app.command("aprovar-temas")
 def aprovar_temas(
     edital_id: int | None = typer.Option(None, "--edital-id"),
