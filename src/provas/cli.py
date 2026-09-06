@@ -225,6 +225,58 @@ def ingest_prova(
         )
 
 
+@app.command("ingest-gabarito")
+def ingest_gabarito(
+    caminho: str,
+    prova_id: int = typer.Option(..., "--prova-id"),
+    tipo: str = typer.Option(..., "--tipo", help="preliminar | definitivo"),
+    caderno: str | None = typer.Option(
+        None, "--caderno", help="Caderno a extrair, se houver vários."
+    ),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Ingere um gabarito e reconcilia com as questões da prova."""
+    from pathlib import Path
+
+    from provas.db.engine import get_engine, get_session_factory
+    from provas.db.fontes import registrar_arquivo_fonte
+    from provas.db.loaders_edital import RegistradorProveniencia
+    from provas.db.loaders_gabarito import reconciliar_gabarito
+    from provas.db.tables import Prova
+    from provas.extraction.client import criar_cliente, modelo_configurado
+    from provas.extraction.gabarito import extrair_gabarito
+    from provas.parsing.docling_parser import parse_pdf
+
+    if tipo not in ("preliminar", "definitivo"):
+        raise typer.BadParameter("--tipo deve ser preliminar ou definitivo")
+
+    engine = get_engine()
+    factory = get_session_factory(engine)
+    with factory() as session:
+        prova = session.get(Prova, prova_id)
+        if prova is None:
+            raise typer.BadParameter(f"prova id={prova_id} não existe")
+        art = parse_pdf(Path(caminho), force=force)
+        arq = registrar_arquivo_fonte(
+            session, Path(caminho), f"gabarito_{tipo}",
+            num_paginas=art.num_paginas, force=force,
+        )
+        cliente = criar_cliente()
+        typer.echo(f"Extraindo gabarito ({modelo_configurado()})...")
+        gab, prompt = extrair_gabarito(cliente, art, caderno=caderno)
+        prov = RegistradorProveniencia(session, arq, modelo_configurado(), prompt)
+        res = reconciliar_gabarito(session, prova=prova, gabarito=gab, tipo=tipo, prov=prov)
+        session.commit()
+        typer.echo(
+            f"Gabarito {tipo} aplicado: {res.aplicados} questões, "
+            f"{res.anuladas} anuladas, {res.alteradas} alteradas."
+        )
+        if res.sem_questao_na_prova:
+            typer.echo(f"AVISO: itens sem questão na prova: {res.sem_questao_na_prova}")
+        if res.sem_item_no_gabarito:
+            typer.echo(f"AVISO: questões sem item no gabarito: {res.sem_item_no_gabarito}")
+
+
 @app.command("aprovar-temas")
 def aprovar_temas(
     edital_id: int | None = typer.Option(None, "--edital-id"),
