@@ -1,0 +1,16 @@
+# dados nunca versionados
+data/raw/
+data/interim/
+data/db/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+
+# ambiente
+.env
