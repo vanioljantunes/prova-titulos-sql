@@ -4,7 +4,6 @@ Cada questão extraída é persistida em data/interim/<hash16>/questoes/qNNN.jso
 antes da carga — reprocessar uma questão que falhou não refaz as demais.
 """
 
-import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -18,11 +17,8 @@ MAX_PAGINAS_POR_CHAMADA = 3  # segurança: questão nunca deveria atravessar mai
 
 
 def _bloco_imagem(png: Path) -> dict[str, Any]:
-    dados = base64.standard_b64encode(png.read_bytes()).decode("ascii")
-    return {
-        "type": "image",
-        "source": {"type": "base64", "media_type": "image/png", "data": dados},
-    }
+    """Bloco neutro; convertido para base64 (API) ou caminho (CLI) pelo client."""
+    return {"type": "image_path", "path": str(png)}
 
 
 def _conteudo_multimodal(art: ParseArtifacts, seg: SegmentoQuestao) -> list[dict[str, Any]]:

@@ -49,12 +49,25 @@ def _carregar_dotenv() -> None:
             os.environ.setdefault(chave.strip(), valor.strip().strip('"').strip("'"))
 
 
+def backend_configurado() -> str:
+    """'api' (Instructor/Anthropic) ou 'cli' (Claude Code CLI, assinatura local).
+
+    PROVAS_BACKEND força; 'auto' usa api se houver chave, senão cli.
+    """
+    _carregar_dotenv()
+    escolha = os.environ.get("PROVAS_BACKEND", "auto")
+    if escolha in ("api", "cli"):
+        return escolha
+    return "api" if os.environ.get("ANTHROPIC_API_KEY") else "cli"
+
+
 def criar_cliente() -> Any:
-    """Instructor sobre Anthropic. Exige ANTHROPIC_API_KEY (ambiente ou .env)."""
+    """Cliente de extração conforme o backend. 'cli' devolve um sentinela."""
+    if backend_configurado() == "cli":
+        return "cli"
     import anthropic
     import instructor
 
-    _carregar_dotenv()
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise RuntimeError(
             "ANTHROPIC_API_KEY ausente. Defina no ambiente ou crie um arquivo .env "
@@ -66,6 +79,31 @@ def criar_cliente() -> Any:
 T = TypeVar("T")
 
 
+def _para_blocos(user_content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if isinstance(user_content, str):
+        return [{"type": "text", "text": user_content}]
+    return user_content
+
+
+def _blocos_para_api(blocos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Converte blocos neutros (image_path) para o formato da API (base64)."""
+    import base64
+
+    saida: list[dict[str, Any]] = []
+    for b in blocos:
+        if b["type"] == "image_path":
+            dados = base64.standard_b64encode(Path(b["path"]).read_bytes()).decode("ascii")
+            saida.append(
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": dados},
+                }
+            )
+        else:
+            saida.append(b)
+    return saida
+
+
 def extrair(
     cliente: Any,
     *,
@@ -74,13 +112,24 @@ def extrair(
     user_content: str | list[dict[str, Any]],
     max_retries: int = 2,
 ) -> T:
-    """Uma chamada de extração estruturada. user_content pode ser multimodal
-    (lista de blocos anthropic: text + image)."""
+    """Uma chamada de extração estruturada. user_content pode ser multimodal:
+    blocos {'type':'text'} e {'type':'image_path'} (neutros entre backends)."""
+    blocos = _para_blocos(user_content)
+    if cliente == "cli":
+        from provas.extraction.cli_backend import extrair_via_cli
+
+        return extrair_via_cli(
+            sistema=prompt.texto,
+            blocos=blocos,
+            response_model=response_model,
+            modelo=modelo_configurado(),
+            max_retries=max_retries,
+        )
     return cliente.chat.completions.create(  # type: ignore[no-any-return]
         model=modelo_configurado(),
         max_tokens=MAX_TOKENS,
         max_retries=max_retries,
         system=prompt.texto,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[{"role": "user", "content": _blocos_para_api(blocos)}],
         response_model=response_model,
     )
