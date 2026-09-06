@@ -470,5 +470,136 @@ def revisar(
         typer.echo(f"\n{len(pendentes)} pendências. Fechar: provas revisar --resolver <ID>")
 
 
+@app.command("export")
+def export(
+    formato: str = typer.Option(..., "--formato", help="csv | parquet"),
+    saida: str = typer.Option(..., "--saida", help="Diretório de saída."),
+) -> None:
+    """Exporta as tabelas + visão achatada de questões (COPY nativo do DuckDB)."""
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from provas.db.engine import get_engine
+
+    if formato not in ("csv", "parquet"):
+        raise typer.BadParameter("--formato deve ser csv ou parquet")
+    destino = Path(saida)
+    destino.mkdir(parents=True, exist_ok=True)
+
+    engine = get_engine()
+    if engine.dialect.name != "duckdb":
+        raise typer.BadParameter(
+            "export usa COPY nativo do DuckDB; para outro banco, exporte via SQL direto."
+        )
+    tabelas = [
+        "sociedade", "arquivo_fonte", "edital", "edital_fase", "edital_cronograma",
+        "tema", "edital_tema", "prova", "contexto", "questao", "alternativa",
+        "questao_midia", "questao_tema", "proveniencia", "validacao",
+    ]
+    visao_flat = """
+        SELECT q.identificador, s.sigla AS sociedade, p.ano, p.edicao, q.numero,
+               q.tipo, q.enunciado, c.texto AS contexto,
+               q.gabarito_preliminar, q.gabarito_oficial, q.status,
+               t.nome AS tema_principal, qt.confianca AS tema_confianca,
+               q.revisada_por_humano
+        FROM questao q
+        JOIN prova p ON p.id = q.prova_id
+        JOIN sociedade s ON s.id = p.sociedade_id
+        LEFT JOIN contexto c ON c.id = q.contexto_id
+        LEFT JOIN questao_tema qt ON qt.questao_id = q.id AND qt.principal
+        LEFT JOIN tema t ON t.id = qt.tema_id
+    """
+    opts = "(HEADER, DELIMITER ',')" if formato == "csv" else "(FORMAT PARQUET)"
+    with engine.connect() as conn:
+        for tabela in tabelas:
+            alvo = (destino / f"{tabela}.{formato}").as_posix()
+            conn.execute(text(f"COPY (SELECT * FROM {tabela}) TO '{alvo}' {opts}"))
+        alvo = (destino / f"questoes_flat.{formato}").as_posix()
+        conn.execute(text(f"COPY ({visao_flat}) TO '{alvo}' {opts}"))
+    typer.echo(f"{len(tabelas) + 1} arquivos {formato} escritos em {destino}.")
+
+
+@app.command("stats")
+def stats() -> None:
+    """Números do banco: questões por sociedade/ano, temas, anuladas, revisão."""
+    from sqlalchemy import text
+
+    from provas.db.engine import get_engine
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        typer.echo("== Questões por sociedade/ano ==")
+        for sigla, ano, n in conn.execute(text("""
+            SELECT s.sigla, p.ano, count(*) FROM questao q
+            JOIN prova p ON p.id = q.prova_id JOIN sociedade s ON s.id = p.sociedade_id
+            GROUP BY s.sigla, p.ano ORDER BY s.sigla, p.ano
+        """)):
+            typer.echo(f"  {sigla} {ano}: {n}")
+
+        typer.echo("== Distribuição por tema (principal) ==")
+        for nome, n in conn.execute(text("""
+            SELECT t.nome, count(*) FROM questao_tema qt
+            JOIN tema t ON t.id = qt.tema_id WHERE qt.principal
+            GROUP BY t.nome ORDER BY count(*) DESC LIMIT 20
+        """)):
+            typer.echo(f"  {n:4d}  {nome}")
+
+        total = conn.execute(text("SELECT count(*) FROM questao")).scalar() or 0
+        if total:
+            anuladas = conn.execute(
+                text("SELECT count(*) FROM questao WHERE status='anulada'")
+            ).scalar() or 0
+            revisadas = conn.execute(
+                text("SELECT count(*) FROM questao WHERE revisada_por_humano")
+            ).scalar() or 0
+            typer.echo(f"== Totais ==\n  questões: {total}")
+            typer.echo(f"  anuladas: {anuladas} ({100 * anuladas / total:.1f}%)")
+            typer.echo(f"  revisadas por humano: {revisadas} ({100 * revisadas / total:.1f}%)")
+
+        typer.echo("== Pendências abertas ==")
+        for sev, n in conn.execute(text("""
+            SELECT severidade, count(*) FROM validacao WHERE NOT resolvido
+            GROUP BY severidade ORDER BY severidade
+        """)):
+            typer.echo(f"  {sev}: {n}")
+
+
+@app.command("avaliar-gold")
+def avaliar_gold(
+    prova_id: int = typer.Option(..., "--prova-id"),
+    gold: str = typer.Option(..., "--gold", help="Arquivo JSON do padrão-ouro."),
+    saida: str | None = typer.Option(None, "--saida", help="Grava o relatório JSON aqui."),
+) -> None:
+    """Compara a extração automática com o padrão-ouro transcrito à mão."""
+    import json
+    from pathlib import Path
+
+    from provas.db.engine import get_engine, get_session_factory
+    from provas.validation.gold import avaliar, carregar_gold
+
+    engine = get_engine()
+    factory = get_session_factory(engine)
+    with factory() as session:
+        rel = avaliar(session, prova_id, carregar_gold(Path(gold)))
+    d = rel.como_dict()
+    typer.echo(
+        f"Questões: gold={d['questoes_gold']} extraídas={d['questoes_extraidas']} "
+        f"faltando={d['questoes_faltando'] or 'nenhuma'}"
+    )
+    for grupo in ("categoricos", "textuais", "estruturais"):
+        typer.echo(f"== {grupo} ==")
+        for campo, m in d[grupo].items():
+            typer.echo(
+                f"  {campo:22s} n={m['total']:4d} exata={m['acuracia_exata']:.1%} "
+                f"omissão={m['taxa_omissao']:.1%} erro={m['taxa_erro']:.1%}"
+            )
+    if saida:
+        Path(saida).write_text(
+            json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        typer.echo(f"Relatório gravado em {saida}.")
+
+
 if __name__ == "__main__":
     app()

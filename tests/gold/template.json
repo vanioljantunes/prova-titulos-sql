@@ -1,0 +1,23 @@
+{
+  "descricao": "Padrão-ouro transcrito à mão. Ver README.md. NÃO preencher com LLM.",
+  "sociedade": "SIGLA",
+  "ano": 2026,
+  "arquivo_pdf": "data/raw/.../arquivo.pdf",
+  "questoes": [
+    {
+      "numero": 1,
+      "tipo": "multipla_escolha",
+      "status": "valida",
+      "gabarito_oficial": null,
+      "enunciado": "",
+      "alternativas": [
+        {"letra": "A", "texto": ""},
+        {"letra": "B", "texto": ""},
+        {"letra": "C", "texto": ""},
+        {"letra": "D", "texto": ""},
+        {"letra": "E", "texto": ""}
+      ],
+      "num_midias": 0
+    }
+  ]
+}
